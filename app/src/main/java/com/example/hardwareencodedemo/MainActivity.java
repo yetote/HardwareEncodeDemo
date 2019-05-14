@@ -18,6 +18,7 @@ import android.hardware.camera2.CameraManager;
 import android.hardware.camera2.CameraMetadata;
 import android.hardware.camera2.CaptureRequest;
 import android.hardware.camera2.TotalCaptureResult;
+import android.hardware.camera2.params.StreamConfigurationMap;
 import android.media.Image;
 import android.media.ImageReader;
 import android.os.Build;
@@ -27,6 +28,7 @@ import android.os.HandlerThread;
 import android.os.Looper;
 import android.util.DisplayMetrics;
 import android.util.Log;
+import android.util.Size;
 import android.view.Display;
 import android.view.Surface;
 import android.view.TextureView;
@@ -92,9 +94,10 @@ public class MainActivity extends AppCompatActivity {
     private CaptureRequest.Builder recordRequestBuilder;
     private SurfaceTexture surfaceTexture;
     private Surface surface;
-    private ByteBuffer byteBuffer;
+    private ByteBuffer byteBuffer, yBuffer, uBuffer, vBuffer;
     private String path;
     int yuvSize;
+    private WriteFile writeFile;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -103,6 +106,8 @@ public class MainActivity extends AppCompatActivity {
         Display dm = this.getWindowManager().getDefaultDisplay();
         Point point = new Point();
         dm.getSize(point);
+//        width = 1600;
+//        heigth = 1200;
         width = point.x;
         heigth = point.y;
         yuvSize = width * heigth * 3 / 2;
@@ -142,22 +147,73 @@ public class MainActivity extends AppCompatActivity {
         }, backgroundHandler);
         blockingQueue = new LinkedBlockingDeque();
         byteBuffer = ByteBuffer.allocate(width * heigth * 3 / 2).order(ByteOrder.nativeOrder());
+        yBuffer = ByteBuffer.allocate(width * heigth).order(ByteOrder.nativeOrder());
+        uBuffer = ByteBuffer.allocate(width * heigth / 4).order(ByteOrder.nativeOrder());
+        vBuffer = ByteBuffer.allocate(width * heigth / 4).order(ByteOrder.nativeOrder());
         path = this.getExternalCacheDir().getPath() + "/res/output.yuv";
+        writeFile = new WriteFile(path);
 
     }
 
     private void dataEnqueue(Image image) {
-        Image.Plane[] planes = image.getPlanes();
+        if (change2YUV420P(byteBuffer, image)) {
+            writeFile.write(byteBuffer);
+        }
 
-        for (int i = 0; i < planes.length; i++) {
-            ByteBuffer iBuffer = planes[i].getBuffer();
-            int iSize = iBuffer.remaining();
-            Log.e(TAG, "pixelStride  " + planes[i].getPixelStride());
-            Log.e(TAG, "rowStride   " + planes[i].getRowStride());
-            Log.e(TAG, "width  " + image.getWidth());
-            Log.e(TAG, "height  " + image.getHeight());
-            Log.e(TAG, "bufferSize  " + iBuffer.position());
-            Log.e(TAG, "Finished reading data from plane  " + i);
+    }
+
+    private boolean change2YUV420P(ByteBuffer byteBuffer, Image image) {
+        clearBuffer(byteBuffer, yBuffer, uBuffer, vBuffer);
+        int w = image.getWidth();
+        int h = image.getHeight();
+        Log.e(TAG, "change2YUV420P: 获取的图片数据宽度为:" + w + "高度为:" + h);
+        yBuffer = image.getPlanes()[0].getBuffer();
+        if (yBuffer.limit() != w * h) {
+            Log.e(TAG, "change2YUV420P: y数据获取不正确，当前数量为:" + yBuffer.limit() + "正确数量为:" + w * h);
+            return false;
+        }
+        Log.e(TAG, "change2YUV420P: ySize" + yBuffer.limit());
+        Toast.makeText(this, "大小为" + image.getPlanes()[1].getBuffer().limit(), Toast.LENGTH_SHORT).show();
+        if (image.getPlanes()[1].getPixelStride() == 2) {
+            Log.e(TAG, "change2YUV420P: 当前格式为yuv420sp格式");
+            for (int j = 0; j < image.getPlanes()[1].getBuffer().limit(); j++) {
+                if ((j & 1) == 0) {
+                    uBuffer.put(image.getPlanes()[1].getBuffer().get(j));
+                } else {
+                    vBuffer.put(image.getPlanes()[1].getBuffer().get(j));
+                }
+            }
+            vBuffer.put(image.getPlanes()[2].getBuffer().get(w * h / 2 - 2));
+        } else {
+            Log.e(TAG, "change2YUV420P: 当前格式为yuv420p格式" + image.getPlanes()[1].getPixelStride());
+            uBuffer = image.getPlanes()[1].getBuffer();
+            vBuffer = image.getPlanes()[2].getBuffer();
+        }
+
+        if (uBuffer.position() != w * h / 4 || vBuffer.position() != w * h / 4) {
+            Log.e(TAG, "change2YUV420P: uv数据出错,uSize:" + uBuffer.position() + "vSize:" + vBuffer.position() + "正确的数据为:" + w * h / 4);
+            return false;
+        }
+        uBuffer.flip();
+        vBuffer.flip();
+        Log.e(TAG, "change2YUV420P: bytesize" + byteBuffer.position());
+        byteBuffer.put(yBuffer);
+        Log.e(TAG, "change2YUV420P: bytesize" + byteBuffer.position());
+        byteBuffer.put(uBuffer);
+        Log.e(TAG, "change2YUV420P: bytesize" + byteBuffer.position());
+        byteBuffer.put(vBuffer);
+        Log.e(TAG, "change2YUV420P: bytesize" + byteBuffer.position());
+        Log.e(TAG, "change2YUV420P: 总数据大小为:" + byteBuffer.position());
+
+        return true;
+    }
+
+
+    private void clearBuffer(ByteBuffer... buffers) {
+        for (int j = 0; j < buffers.length; j++) {
+            if (buffers[i].position() != 0) {
+                buffers[i].clear();
+            }
         }
     }
 
@@ -177,6 +233,9 @@ public class MainActivity extends AppCompatActivity {
                     backCameraId = i;
                     backCameraOrientation = cameraCharacteristics.get(CameraCharacteristics.SENSOR_ORIENTATION);
                     backCameraCharacteristics = cameraCharacteristics;
+                    StreamConfigurationMap configurationMap = backCameraCharacteristics.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP);
+                    Size[] availablePreviewSizes = configurationMap.getOutputSizes(SurfaceTexture.class);
+                    Log.e(TAG, "openCamera: size[]" + Arrays.toString(availablePreviewSizes));
                 }
             }
         } catch (CameraAccessException e) {
@@ -287,28 +346,43 @@ public class MainActivity extends AppCompatActivity {
     }
 
     private void startRecording() {
-        closePreviewSession();
+//        closePreviewSession();
         try {
-            recordRequestBuilder = cameraDevice.createCaptureRequest(CameraDevice.TEMPLATE_PREVIEW);
+            recordRequestBuilder = cameraDevice.createCaptureRequest(CameraDevice.TEMPLATE_STILL_CAPTURE);
             recordRequestBuilder.addTarget(imageReader.getSurface());
             recordRequestBuilder.addTarget(surface);
-            cameraDevice.createCaptureSession(Arrays.asList(surface, imageReader.getSurface()), new CameraCaptureSession.StateCallback() {
+//            cameraDevice.createCaptureSession(Arrays.asList(surface, imageReader.getSurface()), new CameraCaptureSession.StateCallback() {
+//                @Override
+//                public void onConfigured(@NonNull CameraCaptureSession session) {
+//                    captureSession = session;
+//                    recordRequestBuilder.set(CaptureRequest.CONTROL_MODE, CameraMetadata.CONTROL_MODE_AUTO);
+//                    try {
+//                        captureSession.setRepeatingRequest(recordRequestBuilder.build(), null, backgroundHandler);
+//                    } catch (CameraAccessException e) {
+//                        e.printStackTrace();
+//                    }
+//                }
+//
+//                @Override
+//                public void onConfigureFailed(@NonNull CameraCaptureSession session) {
+//
+//                }
+//            }, backgroundHandler);
+            //创建会话
+            CameraCaptureSession.CaptureCallback captureCallback = new CameraCaptureSession.CaptureCallback() {
                 @Override
-                public void onConfigured(@NonNull CameraCaptureSession session) {
-                    captureSession = session;
-                    recordRequestBuilder.set(CaptureRequest.CONTROL_MODE, CameraMetadata.CONTROL_MODE_AUTO);
-                    try {
-                        captureSession.setRepeatingRequest(recordRequestBuilder.build(), null, backgroundHandler);
-                    } catch (CameraAccessException e) {
-                        e.printStackTrace();
-                    }
+                public void onCaptureCompleted(@NonNull CameraCaptureSession session,
+                                               @NonNull CaptureRequest request,
+                                               @NonNull TotalCaptureResult result) {
+                    Log.d(TAG, "onCaptureCompleted: ");
                 }
+            };
 
-                @Override
-                public void onConfigureFailed(@NonNull CameraCaptureSession session) {
+            //停止连续取景
+            captureSession.stopRepeating();
+            //捕获照片
+            captureSession.capture(recordRequestBuilder.build(), captureCallback, null);
 
-                }
-            }, backgroundHandler);
         } catch (CameraAccessException e) {
             e.printStackTrace();
         }
