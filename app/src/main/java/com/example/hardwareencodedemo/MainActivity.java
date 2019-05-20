@@ -1,11 +1,6 @@
 package com.example.hardwareencodedemo;
 
-import androidx.annotation.NonNull;
-import androidx.appcompat.app.AppCompatActivity;
-import androidx.core.app.ActivityCompat;
-
 import android.Manifest;
-import android.content.Context;
 import android.content.pm.PackageManager;
 import android.graphics.ImageFormat;
 import android.graphics.Point;
@@ -21,49 +16,59 @@ import android.hardware.camera2.TotalCaptureResult;
 import android.hardware.camera2.params.StreamConfigurationMap;
 import android.media.Image;
 import android.media.ImageReader;
+import android.media.MediaCodec;
+import android.media.MediaCodecInfo;
+import android.media.MediaFormat;
 import android.os.Build;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.HandlerThread;
-import android.os.Looper;
-import android.util.DisplayMetrics;
 import android.util.Log;
+import android.util.Range;
 import android.util.Size;
 import android.view.Display;
 import android.view.Surface;
 import android.view.TextureView;
 import android.view.View;
 import android.widget.Button;
-import android.widget.TextView;
 import android.widget.Toast;
 
-import java.lang.reflect.Array;
+import androidx.annotation.NonNull;
+import androidx.appcompat.app.AppCompatActivity;
+import androidx.core.app.ActivityCompat;
+
+import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 import java.util.Arrays;
 import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.LinkedBlockingDeque;
 
+import static android.media.MediaCodec.BUFFER_FLAG_END_OF_STREAM;
+import static android.media.MediaCodecInfo.EncoderCapabilities.BITRATE_MODE_CBR;
+import static android.media.MediaCodecInfo.EncoderCapabilities.BITRATE_MODE_CQ;
+import static android.media.MediaCodecInfo.EncoderCapabilities.BITRATE_MODE_VBR;
+
 public class MainActivity extends AppCompatActivity {
-    private CameraManager cameraManager;
     private int frontCameraId = -1, backCameraId = -1;
     private int frontCameraOrientation;
-    private CameraCharacteristics frontCameraCharacteristics;
     private int backCameraOrientation;
-    private CameraCharacteristics backCameraCharacteristics;
-    private static final String TAG = "MainActivity";
-    private TextureView textureView;
-    private Button start;
-    private String[] ids;
+    private int width, heigth;
     public static final int PERMISSION_CAMERA_CODE = 1;
+    private static final String TAG = "MainActivity";
+    private String[] ids;
+    private CameraManager cameraManager;
+    private CameraCharacteristics frontCameraCharacteristics;
+    private CameraCharacteristics backCameraCharacteristics;
     private CameraDevice cameraDevice;
+    private CameraCaptureSession captureSession;
+    private CaptureRequest.Builder previewRequestBuilder;
+    private ImageReader imageReader;
     private HandlerThread backgroundThread;
     private Handler backgroundHandler;
-    private CaptureRequest.Builder previewRequestBuilder;
-    private CameraCaptureSession captureSession;
-    private int width, heigth;
-    private ImageReader imageReader;
-    private BlockingQueue blockingQueue;
+    private TextureView textureView;
+    private Button start;
+    private BlockingQueue<byte[]> blockingQueue;
     TextureView.SurfaceTextureListener listener = new TextureView.SurfaceTextureListener() {
         @Override
         public void onSurfaceTextureAvailable(SurfaceTexture surface, int width, int height) {
@@ -90,14 +95,17 @@ public class MainActivity extends AppCompatActivity {
         }
     };
     private boolean isRecording;
-    private int i = 0;
     private CaptureRequest.Builder recordRequestBuilder;
     private SurfaceTexture surfaceTexture;
     private Surface surface;
     private ByteBuffer byteBuffer, yBuffer, uBuffer, vBuffer;
-    private String path;
+    private String path, yuvpath;
     int yuvSize;
     private WriteFile writeFile;
+    private int bestWidth, bestHeight;
+    private MediaCodec mediaCodec;
+    private MediaFormat mediaFormat;
+    private Range<Integer>[] frameRate;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -106,13 +114,14 @@ public class MainActivity extends AppCompatActivity {
         Display dm = this.getWindowManager().getDefaultDisplay();
         Point point = new Point();
         dm.getSize(point);
-//        width = 1600;
-//        heigth = 1200;
         width = point.x;
         heigth = point.y;
         yuvSize = width * heigth * 3 / 2;
         initViews();
 
+        obtainCameraId();
+
+        initMediaCodec();
 
         start.setOnClickListener(new View.OnClickListener() {
             @Override
@@ -122,11 +131,176 @@ public class MainActivity extends AppCompatActivity {
                     isRecording = false;
                     Log.e(TAG, "onClick: " + "停止录制");
                 } else {
-                    startRecording();
                     isRecording = true;
+                    startRecording();
+                    startEncode();
                 }
             }
         });
+
+
+    }
+
+    private void obtainCameraId() {
+        cameraManager = (CameraManager) this.getSystemService(CAMERA_SERVICE);
+        try {
+            ids = cameraManager.getCameraIdList();
+            for (int i = 0; i < ids.length; i++) {
+                CameraCharacteristics cameraCharacteristics = cameraManager.getCameraCharacteristics(ids[i]);
+                final int orientation = cameraCharacteristics.get(CameraCharacteristics.LENS_FACING);
+                if (orientation == CameraCharacteristics.LENS_FACING_FRONT) {
+                    frontCameraId = i;
+                    frontCameraOrientation = cameraCharacteristics.get(CameraCharacteristics.SENSOR_ORIENTATION);
+                    frontCameraCharacteristics = cameraCharacteristics;
+                } else {
+                    backCameraId = i;
+                    backCameraOrientation = cameraCharacteristics.get(CameraCharacteristics.SENSOR_ORIENTATION);
+                    backCameraCharacteristics = cameraCharacteristics;
+
+                }
+            }
+        } catch (CameraAccessException e) {
+            e.printStackTrace();
+        }
+        if (frontCameraId != -1) {
+            checkSupportLevel("前置", frontCameraCharacteristics.get(CameraCharacteristics.INFO_SUPPORTED_HARDWARE_LEVEL));
+        }
+
+        if (backCameraId != -1) {
+            checkSupportLevel("后置", backCameraCharacteristics.get(CameraCharacteristics.INFO_SUPPORTED_HARDWARE_LEVEL));
+            StreamConfigurationMap configurationMap = backCameraCharacteristics.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP);
+            Size[] availablePreviewSizes = configurationMap.getOutputSizes(ImageFormat.YUV_420_888);
+            Log.e(TAG, "openCamera: size[]" + Arrays.toString(availablePreviewSizes));
+            frameRate = backCameraCharacteristics.get(CameraCharacteristics.CONTROL_AE_AVAILABLE_TARGET_FPS_RANGES);
+            Log.e(TAG, "obtainCameraId: fps为" + Arrays.toString(frameRate));
+            int diff = Integer.MAX_VALUE;
+            for (int j = 0; j < availablePreviewSizes.length - 1; j++) {
+
+                int newDiff = Math.abs(width - availablePreviewSizes[j].getHeight()) + Math.abs(heigth - availablePreviewSizes[j].getWidth());
+                if (newDiff == 0) {
+                    bestWidth = availablePreviewSizes[j].getWidth();
+                    bestHeight = availablePreviewSizes[j].getHeight();
+                    break;
+                }
+
+                if (newDiff < diff) {
+                    bestWidth = availablePreviewSizes[j].getWidth();
+                    bestHeight = availablePreviewSizes[j].getHeight();
+                    diff = newDiff;
+                }
+            }
+            if ((bestHeight & bestWidth) == 1) {
+                Log.e(TAG, "openCamera: 未找到最佳适配方案，将采用最低分辨率");
+                bestWidth = availablePreviewSizes[availablePreviewSizes.length - 1].getWidth();
+                bestHeight = availablePreviewSizes[availablePreviewSizes.length - 1].getHeight();
+            }
+            Log.e(TAG, "openCamera: bestSize:w=" + bestWidth + "h=" + bestHeight);
+            imageReader = ImageReader.newInstance(bestWidth, bestHeight, ImageFormat.YUV_420_888, 1);
+            imageReader.setOnImageAvailableListener(new ImageReader.OnImageAvailableListener() {
+                @Override
+                public void onImageAvailable(ImageReader reader) {
+                    Log.e(TAG, "onImageAvailable:获取图片 ");
+//                    isRecording = true;
+                    Image image = reader.acquireNextImage();
+                    dataEnqueue(image);
+                    image.close();
+                }
+            }, backgroundHandler);
+        }
+    }
+
+
+    private void initMediaCodec() {
+        try {
+            if (bestHeight == 0 || bestWidth == 0) {
+                Log.e(TAG, "initMediaCodec: 无法获取最佳宽度和高度");
+                return;
+            }
+            byteBuffer = ByteBuffer.allocate(bestWidth * bestHeight * 3 / 2).order(ByteOrder.nativeOrder());
+            yBuffer = ByteBuffer.allocate(bestWidth * bestHeight).order(ByteOrder.nativeOrder());
+            uBuffer = ByteBuffer.allocate(bestWidth * bestHeight / 4).order(ByteOrder.nativeOrder());
+            vBuffer = ByteBuffer.allocate(bestWidth * bestHeight / 4).order(ByteOrder.nativeOrder());
+            mediaFormat = MediaFormat.createVideoFormat(MediaFormat.MIMETYPE_VIDEO_AVC, bestWidth, bestHeight);
+            Log.e(TAG, "initMediaCodec: 宽和高" + bestWidth + bestHeight);
+            mediaFormat.setInteger(MediaFormat.KEY_BIT_RATE, bestWidth + bestHeight * 30 * 3);
+            mediaFormat.setInteger(MediaFormat.KEY_BITRATE_MODE, BITRATE_MODE_CBR);
+            mediaFormat.setInteger(MediaFormat.KEY_FRAME_RATE, 30);
+            mediaFormat.setInteger(MediaFormat.KEY_COLOR_FORMAT, MediaCodecInfo.CodecCapabilities.COLOR_FormatYUV420Flexible);
+            mediaFormat.setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, 1);
+            mediaCodec = MediaCodec.createEncoderByType(MediaFormat.MIMETYPE_VIDEO_AVC);
+            mediaCodec.configure(mediaFormat, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE);
+        } catch (IOException e) {
+            e.printStackTrace();
+        }
+
+    }
+
+    private void startEncode() {
+        new Thread(new Runnable() {
+            @Override
+            public void run() {
+                mediaCodec.start();
+                byte[] pts = null;
+                while (true) {
+                    int flag = 0;
+                    try {
+                        if (!isRecording && blockingQueue.size() == 0) {
+                            Log.e(TAG, "startEncode: 编码完成");
+                            mediaCodec.stop();
+                            mediaCodec.release();
+                            break;
+                        }
+                        int inputBufferIndex = mediaCodec.dequeueInputBuffer(-1);
+                        if (inputBufferIndex != -1) {
+
+                            ByteBuffer inputBuffer = mediaCodec.getInputBuffer(inputBufferIndex);
+                            if (inputBuffer != null) {
+                                inputBuffer.clear();
+                                byte[] bytes = blockingQueue.take();
+                                change2YUV420P(inputBuffer, bytes);
+                                if (!isRecording && blockingQueue.size() == 0) {
+                                    Log.e(TAG, "run: 最后一帧");
+                                    flag = BUFFER_FLAG_END_OF_STREAM;
+                                }
+                                mediaCodec.queueInputBuffer(inputBufferIndex, 0, bytes.length, System.currentTimeMillis(), flag);
+                                Log.e(TAG, "run: bytesize" + inputBuffer.limit());
+                            }
+                        }
+                        MediaCodec.BufferInfo bufferInfo = new MediaCodec.BufferInfo();
+                        int outBufferIndex = mediaCodec.dequeueOutputBuffer(bufferInfo, 0);
+                        while (outBufferIndex >= 0) {
+                            ByteBuffer outBuffer = mediaCodec.getOutputBuffer(outBufferIndex);
+                            if (pts == null) {
+                                if (bufferInfo.flags == 2) {
+                                    Log.e(TAG, "run: 第一帧");
+                                    pts = new byte[bufferInfo.size];
+                                    Log.e(TAG, "run:第一帧长度 " + outBuffer.limit());
+                                    Log.e(TAG, "run:第一帧falsg " + bufferInfo.flags);
+                                    Log.e(TAG, "run: ptsSize" + pts.length);
+                                    outBuffer.get(pts);
+                                }
+                            }
+                            if (bufferInfo.flags == 1) {
+                                Log.e(TAG, "run: 关键帧");
+                                writeFile.write(pts);
+                            } else {
+                                outBuffer.position(bufferInfo.offset);
+                                outBuffer.limit(bufferInfo.offset + bufferInfo.size);
+                            }
+                            writeFile.write(outBuffer);
+                            mediaCodec.releaseOutputBuffer(outBufferIndex, false);
+                            outBufferIndex = mediaCodec.dequeueOutputBuffer(bufferInfo, 0);
+                        }
+
+                    } catch (InterruptedException e) {
+                        e.printStackTrace();
+                    }
+                }
+
+            }
+
+        }).start();
+
     }
 
     private void initViews() {
@@ -135,31 +309,67 @@ public class MainActivity extends AppCompatActivity {
         backgroundThread = new HandlerThread("CameraBackground");
         backgroundThread.start();
         backgroundHandler = new Handler(backgroundThread.getLooper());
+        System.out.println();
         Log.e(TAG, "initViews: width" + width + "height" + heigth);
-        imageReader = ImageReader.newInstance(width, heigth, ImageFormat.YUV_420_888, 1);
-        imageReader.setOnImageAvailableListener(new ImageReader.OnImageAvailableListener() {
-            @Override
-            public void onImageAvailable(ImageReader reader) {
-                Image image = reader.acquireNextImage();
-                dataEnqueue(image);
-                image.close();
-            }
-        }, backgroundHandler);
+
         blockingQueue = new LinkedBlockingDeque();
-        byteBuffer = ByteBuffer.allocate(width * heigth * 3 / 2).order(ByteOrder.nativeOrder());
-        yBuffer = ByteBuffer.allocate(width * heigth).order(ByteOrder.nativeOrder());
-        uBuffer = ByteBuffer.allocate(width * heigth / 4).order(ByteOrder.nativeOrder());
-        vBuffer = ByteBuffer.allocate(width * heigth / 4).order(ByteOrder.nativeOrder());
-        path = this.getExternalCacheDir().getPath() + "/res/output.yuv";
+
+        path = this.getExternalCacheDir().getPath() + "/res/output.h264";
+        yuvpath = this.getExternalCacheDir().getPath() + "/res/image.yuv";
         writeFile = new WriteFile(path);
 
     }
 
     private void dataEnqueue(Image image) {
-        if (change2YUV420P(byteBuffer, image)) {
-            writeFile.write(byteBuffer);
+        int w = image.getWidth();
+        int h = image.getHeight();
+        byte[] ybytes = new byte[w * h];
+        byte[] uvbytes = new byte[w * h / 2];
+        byte[] bytes = new byte[w * h * 3 / 2];
+        long putTime = System.currentTimeMillis();
+        image.getPlanes()[0].getBuffer().get(ybytes, 0, w * h);
+        image.getPlanes()[1].getBuffer().get(uvbytes, 0, w * h / 2 - 2);
+        uvbytes[image.getWidth() * image.getHeight() / 2 - 1] = image.getPlanes()[2].getBuffer().get(w * h / 2 - 2);
+        System.arraycopy(ybytes, 0, bytes, 0, ybytes.length);
+        System.arraycopy(uvbytes, 0, bytes, ybytes.length, uvbytes.length);
+        try {
+            blockingQueue.put(bytes);
+            Log.e(TAG, "dataEnqueue: " + bytes[76552]);
+        } catch (InterruptedException e) {
+            e.printStackTrace();
         }
+        Log.e(TAG, "change2YUV420P: 耗时" + (System.currentTimeMillis() - putTime));
+    }
 
+    private boolean change2YUV420P(ByteBuffer byteBuffer, byte[] bytes) {
+        byte[] uvBytes = new byte[bestHeight * bestWidth / 2];
+        Log.e(TAG, "change2YUV420P:bestHeight * bestWidth= " + bestHeight * bestWidth);
+        clearBuffer(byteBuffer, yBuffer, uBuffer, vBuffer);
+        yBuffer.put(bytes, 0, bestHeight * bestWidth);
+        if (yBuffer.position() != bestWidth * bestHeight) {
+            Log.e(TAG, "change2YUV420P: y分量长度不正确");
+            return false;
+        }
+        System.arraycopy(bytes, bestHeight * bestWidth, uvBytes, 0, bestHeight * bestWidth / 2);
+        for (int j = 0; j < uvBytes.length; j++) {
+            if ((j & 1) == 0) {
+                vBuffer.put(uvBytes[j]);
+            } else {
+                uBuffer.put(uvBytes[j]);
+            }
+        }
+        if (uBuffer.position() != bestWidth * bestHeight / 4 || vBuffer.position() != bestWidth * bestHeight / 4) {
+            Log.e(TAG, "change2YUV420P: uv分量长度不正确 ,usize=" + uBuffer.limit() + ",vsize=" + vBuffer.limit() + ",正确的数量是" + bestWidth * bestHeight / 4);
+            return false;
+        }
+        yBuffer.flip();
+        uBuffer.flip();
+        vBuffer.flip();
+        byteBuffer.put(yBuffer);
+        byteBuffer.put(uBuffer);
+        byteBuffer.put(vBuffer);
+
+        return true;
     }
 
     private boolean change2YUV420P(ByteBuffer byteBuffer, Image image) {
@@ -196,6 +406,7 @@ public class MainActivity extends AppCompatActivity {
         }
         uBuffer.flip();
         vBuffer.flip();
+        yBuffer.flip();
         Log.e(TAG, "change2YUV420P: bytesize" + byteBuffer.position());
         byteBuffer.put(yBuffer);
         Log.e(TAG, "change2YUV420P: bytesize" + byteBuffer.position());
@@ -211,43 +422,13 @@ public class MainActivity extends AppCompatActivity {
 
     private void clearBuffer(ByteBuffer... buffers) {
         for (int j = 0; j < buffers.length; j++) {
-            if (buffers[i].position() != 0) {
-                buffers[i].clear();
-            }
+            buffers[j].clear();
         }
+
     }
 
     private void openCamera() {
 
-        cameraManager = (CameraManager) this.getSystemService(CAMERA_SERVICE);
-        try {
-            ids = cameraManager.getCameraIdList();
-            for (int i = 0; i < ids.length; i++) {
-                CameraCharacteristics cameraCharacteristics = cameraManager.getCameraCharacteristics(ids[i]);
-                final int orientation = cameraCharacteristics.get(CameraCharacteristics.LENS_FACING);
-                if (orientation == CameraCharacteristics.LENS_FACING_FRONT) {
-                    frontCameraId = i;
-                    frontCameraOrientation = cameraCharacteristics.get(CameraCharacteristics.SENSOR_ORIENTATION);
-                    frontCameraCharacteristics = cameraCharacteristics;
-                } else {
-                    backCameraId = i;
-                    backCameraOrientation = cameraCharacteristics.get(CameraCharacteristics.SENSOR_ORIENTATION);
-                    backCameraCharacteristics = cameraCharacteristics;
-                    StreamConfigurationMap configurationMap = backCameraCharacteristics.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP);
-                    Size[] availablePreviewSizes = configurationMap.getOutputSizes(SurfaceTexture.class);
-                    Log.e(TAG, "openCamera: size[]" + Arrays.toString(availablePreviewSizes));
-                }
-            }
-        } catch (CameraAccessException e) {
-            e.printStackTrace();
-        }
-        if (frontCameraId != -1) {
-            checkSupportLevel("前置", frontCameraCharacteristics.get(CameraCharacteristics.INFO_SUPPORTED_HARDWARE_LEVEL));
-        }
-
-        if (backCameraId != -1) {
-            checkSupportLevel("后置", backCameraCharacteristics.get(CameraCharacteristics.INFO_SUPPORTED_HARDWARE_LEVEL));
-        }
 
         try {
             if (backCameraId != -1) {
@@ -346,42 +527,28 @@ public class MainActivity extends AppCompatActivity {
     }
 
     private void startRecording() {
-//        closePreviewSession();
+        closePreviewSession();
         try {
             recordRequestBuilder = cameraDevice.createCaptureRequest(CameraDevice.TEMPLATE_STILL_CAPTURE);
             recordRequestBuilder.addTarget(imageReader.getSurface());
             recordRequestBuilder.addTarget(surface);
-//            cameraDevice.createCaptureSession(Arrays.asList(surface, imageReader.getSurface()), new CameraCaptureSession.StateCallback() {
-//                @Override
-//                public void onConfigured(@NonNull CameraCaptureSession session) {
-//                    captureSession = session;
-//                    recordRequestBuilder.set(CaptureRequest.CONTROL_MODE, CameraMetadata.CONTROL_MODE_AUTO);
-//                    try {
-//                        captureSession.setRepeatingRequest(recordRequestBuilder.build(), null, backgroundHandler);
-//                    } catch (CameraAccessException e) {
-//                        e.printStackTrace();
-//                    }
-//                }
-//
-//                @Override
-//                public void onConfigureFailed(@NonNull CameraCaptureSession session) {
-//
-//                }
-//            }, backgroundHandler);
-            //创建会话
-            CameraCaptureSession.CaptureCallback captureCallback = new CameraCaptureSession.CaptureCallback() {
+            cameraDevice.createCaptureSession(Arrays.asList(surface, imageReader.getSurface()), new CameraCaptureSession.StateCallback() {
                 @Override
-                public void onCaptureCompleted(@NonNull CameraCaptureSession session,
-                                               @NonNull CaptureRequest request,
-                                               @NonNull TotalCaptureResult result) {
-                    Log.d(TAG, "onCaptureCompleted: ");
+                public void onConfigured(@NonNull CameraCaptureSession session) {
+                    captureSession = session;
+                    recordRequestBuilder.set(CaptureRequest.CONTROL_MODE, CameraMetadata.CONTROL_MODE_AUTO);
+                    try {
+                        captureSession.setRepeatingRequest(recordRequestBuilder.build(), null, backgroundHandler);
+                    } catch (CameraAccessException e) {
+                        e.printStackTrace();
+                    }
                 }
-            };
 
-            //停止连续取景
-            captureSession.stopRepeating();
-            //捕获照片
-            captureSession.capture(recordRequestBuilder.build(), captureCallback, null);
+                @Override
+                public void onConfigureFailed(@NonNull CameraCaptureSession session) {
+
+                }
+            }, backgroundHandler);
 
         } catch (CameraAccessException e) {
             e.printStackTrace();

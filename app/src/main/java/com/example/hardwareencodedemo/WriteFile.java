@@ -7,6 +7,7 @@ import java.io.FileOutputStream;
 import java.io.IOException;
 import java.io.OutputStream;
 import java.nio.ByteBuffer;
+import java.nio.ByteOrder;
 import java.nio.channels.FileChannel;
 
 /**
@@ -23,6 +24,7 @@ public class WriteFile {
     private FileOutputStream outputStream;
     private FileChannel fileChannel;
     private static final String TAG = "WriteFile";
+    private ByteBuffer byteBuffer;
 
     public WriteFile(String path) {
         try {
@@ -34,6 +36,7 @@ public class WriteFile {
     }
 
     public boolean write(ByteBuffer byteBuffer) {
+        Log.e(TAG, "write: " + byteBuffer.limit());
         if (fileChannel == null) {
             Log.e(TAG, "write: 未打开channel");
             return false;
@@ -52,4 +55,10 @@ public class WriteFile {
 
     }
 
+    public boolean write(byte[] bytes) {
+        byteBuffer = ByteBuffer.allocate(bytes.length).order(ByteOrder.nativeOrder());
+        byteBuffer.clear();
+        byteBuffer.put(bytes);
+        return write(byteBuffer);
+    }
 }
