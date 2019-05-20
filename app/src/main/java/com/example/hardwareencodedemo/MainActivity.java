@@ -12,7 +12,6 @@ import android.hardware.camera2.CameraDevice;
 import android.hardware.camera2.CameraManager;
 import android.hardware.camera2.CameraMetadata;
 import android.hardware.camera2.CaptureRequest;
-import android.hardware.camera2.TotalCaptureResult;
 import android.hardware.camera2.params.StreamConfigurationMap;
 import android.media.Image;
 import android.media.ImageReader;
@@ -26,6 +25,7 @@ import android.os.HandlerThread;
 import android.util.Log;
 import android.util.Range;
 import android.util.Size;
+import android.util.SparseIntArray;
 import android.view.Display;
 import android.view.Surface;
 import android.view.TextureView;
@@ -46,10 +46,18 @@ import java.util.concurrent.LinkedBlockingDeque;
 
 import static android.media.MediaCodec.BUFFER_FLAG_END_OF_STREAM;
 import static android.media.MediaCodecInfo.EncoderCapabilities.BITRATE_MODE_CBR;
-import static android.media.MediaCodecInfo.EncoderCapabilities.BITRATE_MODE_CQ;
 import static android.media.MediaCodecInfo.EncoderCapabilities.BITRATE_MODE_VBR;
 
 public class MainActivity extends AppCompatActivity {
+    private static final SparseIntArray ORIENTATION = new SparseIntArray();
+
+    static {
+        ORIENTATION.append(Surface.ROTATION_0, 90);
+        ORIENTATION.append(Surface.ROTATION_90, 0);
+        ORIENTATION.append(Surface.ROTATION_180, 270);
+        ORIENTATION.append(Surface.ROTATION_270, 180);
+    }
+
     private int frontCameraId = -1, backCameraId = -1;
     private int frontCameraOrientation;
     private int backCameraOrientation;
@@ -98,7 +106,7 @@ public class MainActivity extends AppCompatActivity {
     private CaptureRequest.Builder recordRequestBuilder;
     private SurfaceTexture surfaceTexture;
     private Surface surface;
-    private ByteBuffer byteBuffer, yBuffer, uBuffer, vBuffer;
+    private ByteBuffer byteBuffer, yBuffer, uBuffer, vBuffer, uv1Buffer, uv2Buffer;
     private String path, yuvpath;
     int yuvSize;
     private WriteFile writeFile;
@@ -216,14 +224,19 @@ public class MainActivity extends AppCompatActivity {
                 Log.e(TAG, "initMediaCodec: 无法获取最佳宽度和高度");
                 return;
             }
+//            MediaCodecInfo codecInfo = MediaCodecInfo.VideoCapabilities
+//            codecInfo.getCapabilitiesForType;
             byteBuffer = ByteBuffer.allocate(bestWidth * bestHeight * 3 / 2).order(ByteOrder.nativeOrder());
             yBuffer = ByteBuffer.allocate(bestWidth * bestHeight).order(ByteOrder.nativeOrder());
             uBuffer = ByteBuffer.allocate(bestWidth * bestHeight / 4).order(ByteOrder.nativeOrder());
             vBuffer = ByteBuffer.allocate(bestWidth * bestHeight / 4).order(ByteOrder.nativeOrder());
+            uv1Buffer = ByteBuffer.allocate(bestWidth * bestHeight / 2).order(ByteOrder.nativeOrder());
+            uv2Buffer = ByteBuffer.allocate(bestWidth * bestHeight / 2).order(ByteOrder.nativeOrder());
+
             mediaFormat = MediaFormat.createVideoFormat(MediaFormat.MIMETYPE_VIDEO_AVC, bestWidth, bestHeight);
             Log.e(TAG, "initMediaCodec: 宽和高" + bestWidth + bestHeight);
-            mediaFormat.setInteger(MediaFormat.KEY_BIT_RATE, bestWidth + bestHeight * 30 * 3);
-            mediaFormat.setInteger(MediaFormat.KEY_BITRATE_MODE, BITRATE_MODE_CBR);
+            mediaFormat.setInteger(MediaFormat.KEY_BIT_RATE, bestWidth * bestHeight * 30 * 3);
+            mediaFormat.setInteger(MediaFormat.KEY_BITRATE_MODE, BITRATE_MODE_VBR);
             mediaFormat.setInteger(MediaFormat.KEY_FRAME_RATE, 30);
             mediaFormat.setInteger(MediaFormat.KEY_COLOR_FORMAT, MediaCodecInfo.CodecCapabilities.COLOR_FormatYUV420Flexible);
             mediaFormat.setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, 1);
@@ -258,11 +271,12 @@ public class MainActivity extends AppCompatActivity {
                                 inputBuffer.clear();
                                 byte[] bytes = blockingQueue.take();
                                 change2YUV420P(inputBuffer, bytes);
+//                                writeFile.write(inputBuffer);
                                 if (!isRecording && blockingQueue.size() == 0) {
                                     Log.e(TAG, "run: 最后一帧");
                                     flag = BUFFER_FLAG_END_OF_STREAM;
                                 }
-                                mediaCodec.queueInputBuffer(inputBufferIndex, 0, bytes.length, System.currentTimeMillis(), flag);
+                                mediaCodec.queueInputBuffer(inputBufferIndex, 0, inputBuffer.limit(), System.currentTimeMillis(), flag);
                                 Log.e(TAG, "run: bytesize" + inputBuffer.limit());
                             }
                         }
@@ -323,15 +337,20 @@ public class MainActivity extends AppCompatActivity {
     private void dataEnqueue(Image image) {
         int w = image.getWidth();
         int h = image.getHeight();
+        Log.e(TAG, "dataEnqueue: imageformat" + image.getFormat());
         byte[] ybytes = new byte[w * h];
-        byte[] uvbytes = new byte[w * h / 2];
-        byte[] bytes = new byte[w * h * 3 / 2];
+        byte[] uv1bytes = new byte[w * h / 2];
+        byte[] uv2bytes = new byte[w * h / 2];
+        byte[] bytes = new byte[w * h * 2];
         long putTime = System.currentTimeMillis();
         image.getPlanes()[0].getBuffer().get(ybytes, 0, w * h);
-        image.getPlanes()[1].getBuffer().get(uvbytes, 0, w * h / 2 - 2);
-        uvbytes[image.getWidth() * image.getHeight() / 2 - 1] = image.getPlanes()[2].getBuffer().get(w * h / 2 - 2);
+        image.getPlanes()[1].getBuffer().get(uv1bytes, 0, w * h / 2 - 2);
+        image.getPlanes()[2].getBuffer().get(uv2bytes, 0, w * h / 2 - 2);
+//        uvbytes[image.getWidth() * image.getHeight() / 2 - 1] = image.getPlanes()[2].getBuffer().get(w * h / 2 - 2);
         System.arraycopy(ybytes, 0, bytes, 0, ybytes.length);
-        System.arraycopy(uvbytes, 0, bytes, ybytes.length, uvbytes.length);
+        System.arraycopy(uv1bytes, 0, bytes, ybytes.length, uv1bytes.length);
+        System.arraycopy(uv2bytes, 0, bytes, ybytes.length + uv1bytes.length, uv1bytes.length);
+
         try {
             blockingQueue.put(bytes);
             Log.e(TAG, "dataEnqueue: " + bytes[76552]);
@@ -342,32 +361,41 @@ public class MainActivity extends AppCompatActivity {
     }
 
     private boolean change2YUV420P(ByteBuffer byteBuffer, byte[] bytes) {
-        byte[] uvBytes = new byte[bestHeight * bestWidth / 2];
+        Log.e(TAG, "change2YUV420P: bytebuffer.capt" + byteBuffer.capacity());
+        byte[] uv1Bytes = new byte[bestHeight * bestWidth / 2];
+        byte[] uv2Bytes = new byte[bestHeight * bestWidth / 2];
         Log.e(TAG, "change2YUV420P:bestHeight * bestWidth= " + bestHeight * bestWidth);
-        clearBuffer(byteBuffer, yBuffer, uBuffer, vBuffer);
+        clearBuffer(byteBuffer, yBuffer, uBuffer, vBuffer, uv1Buffer, uv2Buffer);
         yBuffer.put(bytes, 0, bestHeight * bestWidth);
         if (yBuffer.position() != bestWidth * bestHeight) {
             Log.e(TAG, "change2YUV420P: y分量长度不正确");
             return false;
         }
-        System.arraycopy(bytes, bestHeight * bestWidth, uvBytes, 0, bestHeight * bestWidth / 2);
-        for (int j = 0; j < uvBytes.length; j++) {
-            if ((j & 1) == 0) {
-                vBuffer.put(uvBytes[j]);
-            } else {
-                uBuffer.put(uvBytes[j]);
-            }
-        }
-        if (uBuffer.position() != bestWidth * bestHeight / 4 || vBuffer.position() != bestWidth * bestHeight / 4) {
-            Log.e(TAG, "change2YUV420P: uv分量长度不正确 ,usize=" + uBuffer.limit() + ",vsize=" + vBuffer.limit() + ",正确的数量是" + bestWidth * bestHeight / 4);
-            return false;
-        }
+        System.arraycopy(bytes, bestHeight * bestWidth, uv1Bytes, 0, bestHeight * bestWidth / 2);
+//        System.arraycopy(bytes, bestHeight * bestWidth * 3 / 2, uv2Bytes, 0, bestHeight * bestWidth / 2);
+////        for (int j = 0; j < uv1Bytes.length; j++) {
+//            if ((j & 1) == 0) {
+//                vBuffer.put(uvBytes[j]);
+//            } else {
+//                uBuffer.put(uvBytes[j]);
+//            }
+//        }
+//        if (uBuffer.position() != bestWidth * bestHeight / 4 || vBuffer.position() != bestWidth * bestHeight / 4) {
+//            Log.e(TAG, "change2YUV420P: uv分量长度不正确 ,usize=" + uBuffer.limit() + ",vsize=" + vBuffer.limit() + ",正确的数量是" + bestWidth * bestHeight / 4);
+//            return false;
+//        }
+        uv1Buffer.put(uv1Bytes);
+        uv2Buffer.put(uv2Bytes);
         yBuffer.flip();
         uBuffer.flip();
         vBuffer.flip();
+        uv1Buffer.flip();
+        uv2Buffer.flip();
         byteBuffer.put(yBuffer);
-        byteBuffer.put(uBuffer);
-        byteBuffer.put(vBuffer);
+        byteBuffer.put(uv1Buffer);
+//        byteBuffer.put(uv2Buffer);
+//        byteBuffer.put(uBuffer);
+//        byteBuffer.put(vBuffer);
 
         return true;
     }
@@ -529,9 +557,11 @@ public class MainActivity extends AppCompatActivity {
     private void startRecording() {
         closePreviewSession();
         try {
+            int rotation = getWindowManager().getDefaultDisplay().getRotation();
             recordRequestBuilder = cameraDevice.createCaptureRequest(CameraDevice.TEMPLATE_STILL_CAPTURE);
             recordRequestBuilder.addTarget(imageReader.getSurface());
             recordRequestBuilder.addTarget(surface);
+            recordRequestBuilder.set(CaptureRequest.JPEG_ORIENTATION, ORIENTATION.get(rotation));
             cameraDevice.createCaptureSession(Arrays.asList(surface, imageReader.getSurface()), new CameraCaptureSession.StateCallback() {
                 @Override
                 public void onConfigured(@NonNull CameraCaptureSession session) {
