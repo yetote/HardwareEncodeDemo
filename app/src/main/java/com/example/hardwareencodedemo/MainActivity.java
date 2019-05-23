@@ -45,8 +45,10 @@ import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.LinkedBlockingDeque;
 
 import static android.media.MediaCodec.BUFFER_FLAG_END_OF_STREAM;
-import static android.media.MediaCodecInfo.EncoderCapabilities.BITRATE_MODE_CBR;
 import static android.media.MediaCodecInfo.EncoderCapabilities.BITRATE_MODE_VBR;
+import static android.view.View.SYSTEM_UI_FLAG_FULLSCREEN;
+import static android.view.View.SYSTEM_UI_FLAG_HIDE_NAVIGATION;
+import static android.view.View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY;
 
 public class MainActivity extends AppCompatActivity {
     private static final SparseIntArray ORIENTATION = new SparseIntArray();
@@ -89,7 +91,12 @@ public class MainActivity extends AppCompatActivity {
 
         @Override
         public void onSurfaceTextureSizeChanged(SurfaceTexture surface, int width, int height) {
-
+            if (bestHeight == 0 || bestWidth == 0) {
+                Log.e(TAG, "onSurfaceTextureSizeChanged: 未打开相机");
+                return;
+            }
+            Log.e(TAG, "onSurfaceTextureSizeChanged: width=" + width + "height=" + height);
+            surface.setDefaultBufferSize(bestWidth, bestHeight);
         }
 
         @Override
@@ -118,6 +125,9 @@ public class MainActivity extends AppCompatActivity {
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
+        this.getWindow().getDecorView().setSystemUiVisibility(SYSTEM_UI_FLAG_IMMERSIVE_STICKY
+                | SYSTEM_UI_FLAG_FULLSCREEN
+                | SYSTEM_UI_FLAG_HIDE_NAVIGATION);
         setContentView(R.layout.activity_main);
         Display dm = this.getWindowManager().getDefaultDisplay();
         Point point = new Point();
@@ -178,7 +188,9 @@ public class MainActivity extends AppCompatActivity {
             checkSupportLevel("后置", backCameraCharacteristics.get(CameraCharacteristics.INFO_SUPPORTED_HARDWARE_LEVEL));
             StreamConfigurationMap configurationMap = backCameraCharacteristics.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP);
             Size[] availablePreviewSizes = configurationMap.getOutputSizes(ImageFormat.YUV_420_888);
+            Size[] surfacePreviewSize = configurationMap.getOutputSizes(SurfaceTexture.class);
             Log.e(TAG, "openCamera: size[]" + Arrays.toString(availablePreviewSizes));
+            Log.e(TAG, "openCamera: surfacesize[]" + Arrays.toString(surfacePreviewSize));
             frameRate = backCameraCharacteristics.get(CameraCharacteristics.CONTROL_AE_AVAILABLE_TARGET_FPS_RANGES);
             Log.e(TAG, "obtainCameraId: fps为" + Arrays.toString(frameRate));
             int diff = Integer.MAX_VALUE;
@@ -203,6 +215,7 @@ public class MainActivity extends AppCompatActivity {
                 bestHeight = availablePreviewSizes[availablePreviewSizes.length - 1].getHeight();
             }
             Log.e(TAG, "openCamera: bestSize:w=" + bestWidth + "h=" + bestHeight);
+//            textureView.setAspectRatio(bestWidth, bestHeight);
             imageReader = ImageReader.newInstance(bestWidth, bestHeight, ImageFormat.YUV_420_888, 1);
             imageReader.setOnImageAvailableListener(new ImageReader.OnImageAvailableListener() {
                 @Override
@@ -520,7 +533,7 @@ public class MainActivity extends AppCompatActivity {
             Log.e(TAG, "createPreview: textureView不可用");
         }
         surfaceTexture = textureView.getSurfaceTexture();
-        surfaceTexture.setDefaultBufferSize(width, heigth);
+        surfaceTexture.setDefaultBufferSize(bestWidth, bestHeight);
         surface = new Surface(surfaceTexture);
         try {
             previewRequestBuilder = cameraDevice.createCaptureRequest(CameraDevice.TEMPLATE_PREVIEW);
@@ -530,8 +543,8 @@ public class MainActivity extends AppCompatActivity {
                 public void onConfigured(@NonNull CameraCaptureSession session) {
                     captureSession = session;
                     Toast.makeText(MainActivity.this, "摄像头完成配置，可以处理Capture请求了。", Toast.LENGTH_SHORT).show();
-                    previewRequestBuilder.set(CaptureRequest.CONTROL_MODE, CameraMetadata.CONTROL_MODE_AUTO);
-                    CaptureRequest captureRequest = previewRequestBuilder.build();
+                        previewRequestBuilder.set(CaptureRequest.CONTROL_MODE, CameraMetadata.CONTROL_MODE_AUTO);
+                        CaptureRequest captureRequest = previewRequestBuilder.build();
                     try {
                         captureSession.setRepeatingRequest(captureRequest, null, backgroundHandler);
                     } catch (CameraAccessException e) {
